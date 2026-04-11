@@ -29,7 +29,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ================= 配置区 =================
-DINGTALK_WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=c5d26cf25df7d56b5e9bf1b08bbf888ee9b18ed2f9e89ef9cdd2548b3ffeede3"
+DINGTALK_WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=4037d68aeb929fa3791713dc4b947565a938776fb2edca1c8040faa144b4e216"
 WECOM_WEBHOOK = "在此粘贴你的企微 Webhook"
 CACHE_FILE = "/tmp/signal_cache.json"
 PORTFOLIO_FILE = "/tmp/portfolio.json"
