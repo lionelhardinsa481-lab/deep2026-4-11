@@ -9,27 +9,31 @@ import json
 from datetime import datetime
 import plotly.graph_objects as go
 
-# ================= 配置区 (请在此修改) =================
-DINGTALK_WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=4037d68aeb929fa3791713dc4b947565a938776fb2edca1c8040faa144b4e216"
-STARTING_CAPITAL = 1000.0  # 初始模拟资金
-RISK_PER_TRADE = 0.2       # 每笔交易占用总资金的 20%
+# ================= 核心配置区 =================
+# 请在此填入你的钉钉 Webhook Token
+DEFAULT_WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=4037d68aeb929fa3791713dc4b947565a938776fb2edca1c8040faa144b4e216"
+STARTING_CAPITAL = 1000.0  
+RISK_PER_TRADE = 0.2       
 SYMBOLS = [
     "BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "BNB/USDT:USDT", 
     "SUI/USDT:USDT", "DOGE/USDT:USDT", "ORDI/USDT:USDT", "PEPE/USDT:USDT"
 ]
 
-# ================= 页面设置 =================
-st.set_page_config(page_title="Crypto Simulator Pro", layout="wide")
+# ================= 页面初始化 =================
+st.set_page_config(page_title="Crypto Simulator Pro v3.1", layout="wide")
 
+# 自定义 CSS 样式
 st.markdown("""
 <style>
-    .reportview-container { background: #f0f2f6; }
-    .stat-card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-    .status-online { color: #10b981; font-weight: bold; }
+    .stApp { background-color: #f8fafc; }
+    .main-header { font-size: 2.5rem; font-weight: 800; color: #1e3a8a; text-align: center; margin-bottom: 20px; }
+    .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
+    .stButton button { width: 100%; border-radius: 8px; transition: all 0.2s; }
+    .stButton button:hover { transform: scale(1.02); }
 </style>
 """, unsafe_allow_html=True)
 
-# ================= 状态管理 (持久化模拟资产) =================
+# 模拟账户持久化
 if 'account' not in st.session_state:
     st.session_state.account = {
         "balance": STARTING_CAPITAL,
@@ -38,168 +42,147 @@ if 'account' not in st.session_state:
         "equity_curve": [STARTING_CAPITAL]
     }
 
-# ================= 工具函数 =================
-def ding_push(content):
-    """发送钉钉通知"""
-    if "替换" in DINGTALK_WEBHOOK: return
-    data = {"msgtype": "text", "text": {"content": f"🤖 模拟器提醒：\n{content}"}}
+# ================= 钉钉推送与测试工具 =================
+def ding_push(content, webhook_url=DEFAULT_WEBHOOK):
+    """发送钉钉通知并返回结果状态"""
+    if "替换" in webhook_url or not webhook_url:
+        return False, "未配置有效的 Webhook 地址"
+    
+    data = {
+        "msgtype": "text",
+        "text": {"content": f"🤖 模拟器实战提醒：\n{content}"}
+    }
     try:
-        requests.post(DINGTALK_WEBHOOK, json=data, timeout=5)
-    except: pass
+        response = requests.post(webhook_url, json=data, timeout=5)
+        res_json = response.json()
+        if res_json.get("errcode") == 0:
+            return True, "推送成功"
+        else:
+            return False, f"钉钉返回错误: {res_json.get('errmsg')}"
+    except Exception as e:
+        return False, f"网络请求失败: {str(e)}"
 
+# ================= 核心计算引擎 =================
 @st.cache_resource
-def init_ex():
+def get_ex():
     return ccxt.okx({"options": {"defaultType": "swap"}, "enableRateLimit": True})
 
 def calc_indicators(df):
-    # 基础指标计算
     df['ema50'] = df['c'].ewm(span=50).mean()
     df['ema200'] = df['c'].ewm(span=200).mean()
-    # ATR 止损参考
     df['tr'] = np.maximum(df['h']-df['l'], np.maximum(abs(df['h']-df['c'].shift(1)), abs(df['l']-df['c'].shift(1))))
     df['atr'] = df['tr'].rolling(14).mean()
-    # 波动异动
-    df['pct'] = df['c'].pct_change()
     df['vol_ma'] = df['v'].rolling(20).mean()
     return df
 
-# ================= 模拟执行引擎 =================
-def run_simulation_step():
-    ex = init_ex()
+def run_engine():
+    ex = get_ex()
     acc = st.session_state.account
-    now_str = datetime.now().strftime("%H:%M:%S")
+    now = datetime.now().strftime("%H:%M:%S")
     
-    # 1. 检查现有持仓 (平仓逻辑)
-    active_positions = []
+    # 1. 自动平仓检查
+    active = []
     for pos in acc['positions']:
         try:
             ticker = ex.fetch_ticker(f"{pos['symbol']}/USDT:USDT")
             curr_p = ticker['last']
-            
-            # 计算盈亏
             pnl_pct = (curr_p - pos['entry']) / pos['entry'] if pos['side'] == '多' else (pos['entry'] - curr_p) / pos['entry']
             
-            # 触发止损或止盈
-            is_exit = False
-            reason = ""
+            exit_flag, reason = False, ""
             if curr_p <= pos['sl'] if pos['side'] == '多' else curr_p >= pos['sl']:
-                is_exit, reason = True, "🛑 触发止损"
+                exit_flag, reason = True, "🛑 止损平仓"
             elif curr_p >= pos['tp'] if pos['side'] == '多' else curr_p <= pos['tp']:
-                is_exit, reason = True, "🎯 触发止盈"
+                exit_flag, reason = True, "🎯 止盈平仓"
             
-            if is_exit:
-                profit_usd = pos['margin'] * pnl_pct
-                acc['balance'] += (pos['margin'] + profit_usd)
-                pos.update({"exit_price": curr_p, "pnl_usd": profit_usd, "pnl_pct": pnl_pct, "reason": reason, "close_time": now_str})
+            if exit_flag:
+                profit = pos['margin'] * pnl_pct
+                acc['balance'] += (pos['margin'] + profit)
+                pos.update({"exit": curr_p, "pnl_usd": profit, "pnl_pct": pnl_pct, "reason": reason, "close_time": now})
                 acc['history'].append(pos)
                 acc['equity_curve'].append(acc['balance'])
-                ding_push(f"【平仓成功】\n币种：{pos['symbol']}\n方向：{pos['side']}\n盈亏：{profit_usd:.2f} USDT ({pnl_pct*100:.2f}%)")
+                ding_push(f"【平仓成功】\n币种：{pos['symbol']}\n结果：{reason}\n盈亏：{profit:.2f} USDT")
             else:
-                active_positions.append(pos)
-        except:
-            active_positions.append(pos)
-    
-    acc['positions'] = active_positions
+                active.append(pos)
+        except: active.append(pos)
+    acc['positions'] = active
 
-    # 2. 扫描新信号 (入场逻辑)
-    if acc['balance'] > (STARTING_CAPITAL * 0.1): # 账户里还有钱才扫描
-        for sym in SYMBOLS:
-            if any(p['symbol'] == sym.split('/')[0] for p in acc['positions']): continue
+    # 2. 自动入场扫描
+    for sym in SYMBOLS:
+        sym_name = sym.split('/')[0]
+        if any(p['symbol'] == sym_name for p in acc['positions']): continue
+        try:
+            ohlcv = ex.fetch_ohlcv(sym, timeframe='15m', limit=100)
+            df = calc_indicators(pd.DataFrame(ohlcv, columns=['t','o','h','l','c','v']))
+            last = df.iloc[-1]
             
-            try:
-                ohlcv = ex.fetch_ohlcv(sym, timeframe='15m', limit=100)
-                df = calc_indicators(pd.DataFrame(ohlcv, columns=['t','o','h','l','c','v']))
-                last = df.iloc[-1]
+            # 策略条件：EMA多头趋势 + 成交量爆发
+            if last['c'] > last['ema50'] and last['v'] > last['vol_ma'] * 2.5:
+                entry = last['c']
+                sl = entry - (1.5 * last['atr'])
+                tp = entry + (3.0 * last['atr'])
+                margin = acc['balance'] * RISK_PER_TRADE
                 
-                # 策略逻辑：均线多头 + 异动突破
-                if last['c'] > last['ema50'] and last['v'] > last['vol_ma'] * 2:
-                    entry_p = last['c']
-                    atr_val = last['atr']
-                    sl = entry_p - (2 * atr_val)
-                    tp = entry_p + (4 * atr_val)
-                    margin = acc['balance'] * RISK_PER_TRADE
-                    
-                    acc['balance'] -= margin
-                    new_pos = {
-                        "symbol": sym.split('/')[0],
-                        "side": "多",
-                        "entry": entry_p,
-                        "margin": margin,
-                        "sl": sl,
-                        "tp": tp,
-                        "time": now_str
-                    }
-                    acc['positions'].append(new_pos)
-                    ding_push(f"【入场提醒】\n币种：{new_pos['symbol']}\n价格：{entry_p}\n止损：{sl:.4f}")
-            except: continue
+                acc['balance'] -= margin
+                acc['positions'].append({"symbol": sym_name, "side": "多", "entry": entry, "margin": margin, "sl": sl, "tp": tp, "time": now})
+                ding_push(f"【入场提醒】\n币种：{sym_name}\n价格：{entry}\n止损位：{sl:.4f}")
+        except: continue
 
-# ================= UI 渲染 =================
-st.title("⚡ Crypto 自动模拟实战终端")
+# ================= UI 界面 =================
+st.markdown('<div class="main-header">⚡ CRYPTO SIMULATOR PRO</div>', unsafe_allow_html=True)
 
-# 顶部数据卡片
-acc = st.session_state.account
-unrealized_pnl = 0
-for p in acc['positions']:
-    # 简单模拟实时浮盈
-    unrealized_pnl += (p['margin'] * 0.01) # 演示用
-
-total_equity = acc['balance'] + sum(p['margin'] for p in acc['positions']) + unrealized_pnl
-total_return = (total_equity - STARTING_CAPITAL) / STARTING_CAPITAL * 100
-
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("账户总资产 (Equity)", f"${total_equity:.2f} USDT")
-c2.metric("可用余额", f"${acc['balance']:.2f}")
-c3.metric("总收益率", f"{total_return:.2f}%", delta=f"{total_equity-STARTING_CAPITAL:.2f}")
-c4.metric("运行状态", "工作中", delta_color="normal")
-
-# 侧边栏控制
+# 侧边栏：配置与测试工具
 with st.sidebar:
-    st.header("模拟器控制")
-    if st.button("🔄 手动刷新扫描"):
-        run_simulation_step()
+    st.header("⚙️ 系统配置")
+    webhook_input = st.text_input("钉钉 Webhook", value=DEFAULT_WEBHOOK, type="password")
     
+    st.subheader("🧪 联调测试")
+    if st.button("发送测试提醒", help="点击向钉钉发送一条测试消息"):
+        with st.spinner("正在通信..."):
+            success, msg = ding_push("这是一条来自模拟器的连通性测试消息。如果你看到这条信息，说明配置正确！", webhook_url=webhook_input)
+            if success:
+                st.success("✅ 推送成功！请检查钉钉群。")
+            else:
+                st.error(f"❌ {msg}")
+
     st.divider()
-    st.write("📈 **策略参数**")
-    st.write(f"- 起始资金: {STARTING_CAPITAL}")
-    st.write(f"- 单笔仓位: {RISK_PER_TRADE*100}%")
+    if st.button("🚀 立即刷新行情", type="primary"):
+        run_engine()
     
-    if st.button("🗑️ 重置账户"):
+    if st.button("♻️ 重置模拟账户"):
         st.session_state.account = {"balance": STARTING_CAPITAL, "positions": [], "history": [], "equity_curve": [STARTING_CAPITAL]}
         st.rerun()
 
-# 主界面布局
-t1, t2, t3 = st.tabs(["📊 实战看板", "🛠️ 当前持仓", "📜 历史对账"])
+# 主看板
+acc = st.session_state.account
+equity = acc['balance'] + sum(p['margin'] for p in acc['positions'])
+roi = (equity - STARTING_CAPITAL) / STARTING_CAPITAL * 100
 
-with t1:
-    col_l, col_r = st.columns([2, 1])
-    with col_l:
-        st.subheader("资产增长曲线")
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(y=acc['equity_curve'], mode='lines+markers', name='Equity', line=dict(color='#2563eb')))
-        fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), height=300)
-        st.plotly_chart(fig, use_container_width=True)
-    
-    with col_r:
-        st.subheader("胜率分析")
-        wins = len([h for h in acc['history'] if h.get('pnl_usd', 0) > 0])
-        total = len(acc['history'])
-        wr = (wins / total * 100) if total > 0 else 0
-        st.markdown(f"### {wr:.1f}%")
-        st.progress(wr/100)
-        st.caption(f"已完成交易: {total} 次")
+c1, c2, c3 = st.columns(3)
+with c1:
+    st.metric("账户净值 (Equity)", f"${equity:.2f}", delta=f"{roi:.2f}%")
+with c2:
+    st.metric("可用资金", f"${acc['balance']:.2f}")
+with c3:
+    st.metric("总交易单数", len(acc['history']))
 
-with t2:
+# 标签页展示
+tab1, tab2, tab3 = st.tabs(["📈 收益曲线", "🏹 当前持仓", "📜 历史记录"])
+
+with tab1:
+    fig = go.Figure(data=go.Scatter(y=acc['equity_curve'], mode='lines+markers', line=dict(color='#2563eb', width=3)))
+    fig.update_layout(title="资产增长轨迹 (USDT)", height=350, margin=dict(l=20, r=20, t=50, b=20))
+    st.plotly_chart(fig, use_container_width=True)
+
+with tab2:
     if not acc['positions']:
-        st.info("监控中... 暂无符合信号入场的持仓")
+        st.info("监控中... 暂无入场信号。")
     else:
-        st.table(pd.DataFrame(acc['positions'])[['symbol', 'side', 'entry', 'margin', 'time']])
+        st.dataframe(pd.DataFrame(acc['positions']), use_container_width=True)
 
-with t3:
+with tab3:
     if not acc['history']:
-        st.write("暂无成交历史")
+        st.write("暂无历史成交记录。")
     else:
-        df_h = pd.DataFrame(acc['history'])
-        st.dataframe(df_h[['symbol', 'side', 'entry', 'exit_price', 'pnl_usd', 'reason', 'close_time']], use_container_width=True)
+        st.dataframe(pd.DataFrame(acc['history']).sort_index(ascending=False), use_container_width=True)
 
-# 自动运行提示
-st.toast("系统已启动，正在实时监控行情并执行策略...")
+st.caption("注：本模拟器基于 15m K线进行趋势追踪，数据实时取自 OKX。")
