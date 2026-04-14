@@ -7,52 +7,60 @@ import time
 import json
 import os
 from datetime import datetime
+import plotly.graph_objects as go
 
 # ================= 页面配置 =================
 st.set_page_config(
-    page_title="Crypto 实战信号监控 Pro",
-    page_icon="📈",
+    page_title="Crypto Signal Pro",
+    page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# ================= 自定义 CSS =================
+# ================= 极致 UI 美化 CSS =================
 st.markdown("""
 <style>
-    .main-header { font-size: 2.5rem; font-weight: 700; color: #0F52BA; margin-bottom: 0; }
-    .sub-header { color: #666; margin-top: 0; }
-    .metric-card { background: #f8f9fa; border-radius: 10px; padding: 15px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
-    .stButton button { width: 100%; border-radius: 8px; font-weight: 600; }
-    .high-prob { background-color: #d4edda; color: #155724; padding: 2px 8px; border-radius: 12px; font-weight: bold; }
-    .low-prob { background-color: #fff3cd; color: #856404; padding: 2px 8px; border-radius: 12px; font-weight: bold; }
+    /* 全局背景与字体优化 */
+    .stApp { background-color: #f4f7f9; }
+    .main-header { font-size: 2.8rem; font-weight: 800; color: #1E3A8A; margin-bottom: 0.5rem; text-align: center; }
+    .sub-header { color: #64748b; margin-top: 0; text-align: center; margin-bottom: 2rem; }
+    
+    /* 指标卡片美化 */
+    [data-testid="stMetricValue"] { font-size: 1.8rem; font-weight: 700; color: #1e293b; }
+    .metric-container { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1); }
+    
+    /* 侧边栏样式 */
+    section[data-testid="stSidebar"] { background-color: #1e293b; color: white; }
+    section[data-testid="stSidebar"] .stMarkdown { color: #cbd5e1; }
+    
+    /* 状态标签样式 */
+    .signal-high { background-color: #dcfce7; color: #166534; padding: 4px 12px; border-radius: 20px; font-weight: 600; font-size: 0.8rem; }
+    .signal-low { background-color: #fef9c3; color: #854d0e; padding: 4px 12px; border-radius: 20px; font-weight: 600; font-size: 0.8rem; }
+    
+    /* 自定义按钮 */
+    .stButton button { width: 100%; border-radius: 8px; background-color: #2563eb; color: white; border: none; padding: 0.5rem; transition: all 0.3s; }
+    .stButton button:hover { background-color: #1d4ed8; transform: translateY(-1px); }
 </style>
 """, unsafe_allow_html=True)
 
-# ================= 配置区 =================
-DINGTALK_WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=4037d68aeb929fa3791713dc4b947565a938776fb2edca1c8040faa144b4e216"
-WECOM_WEBHOOK = "在此粘贴你的企微 Webhook"
+# ================= 常量与持久化 =================
 CACHE_FILE = "/tmp/signal_cache.json"
 PORTFOLIO_FILE = "/tmp/portfolio.json"
 HISTORY_FILE = "/tmp/history.json"
 
-# ================= 持久化辅助函数 =================
 def load_json(filepath, default):
     if os.path.exists(filepath):
         try:
-            with open(filepath, "r") as f:
-                return json.load(f)
-        except:
-            return default
+            with open(filepath, "r") as f: return json.load(f)
+        except: return default
     return default
 
 def save_json(filepath, data):
     try:
-        with open(filepath, "w") as f:
-            json.dump(data, f)
-    except:
-        pass
+        with open(filepath, "w") as f: json.dump(data, f)
+    except: pass
 
-# ================= 初始化 Session State =================
+# ================= 初始化状态 =================
 if "cache_data" not in st.session_state:
     st.session_state.cache_data = load_json(CACHE_FILE, {})
 if "portfolio" not in st.session_state:
@@ -65,425 +73,258 @@ def save_all_states():
     save_json(PORTFOLIO_FILE, st.session_state.portfolio)
     save_json(HISTORY_FILE, st.session_state.history)
 
-now_ts = time.time()
-st.session_state.cache_data = {k: v for k, v in st.session_state.cache_data.items() if now_ts - v < 3600}
-
-# ================= 交易所连接 =================
+# ================= 交易所逻辑 =================
 @st.cache_resource
-def get_smart_exchange():
+def get_exchange():
     try:
-        ex = ccxt.okx({
-            "options": {"defaultType": "swap"},
-            "enableRateLimit": True,
-            "timeout": 10000
-        })
+        # 尝试连接 OKX
+        ex = ccxt.okx({"options": {"defaultType": "swap"}, "enableRateLimit": True, "timeout": 15000})
         ex.fetch_ticker("BTC/USDT:USDT")
         return ex, "OKX"
     except:
-        pass
-    try:
-        ex = ccxt.binance({
-            "options": {"defaultType": "swap"},
-            "enableRateLimit": True,
-            "timeout": 10000,
-            "urls": {"api": {"public": "https://api.binance.vision"}}
-        })
-        ex.fetch_ticker("BTC/USDT:USDT")
-        return ex, "Binance"
-    except:
-        return None, "连接失败"
-
-EXCHANGE, EXCHANGE_NAME = get_smart_exchange()
-
-# ================= 核心币种列表 =================
-CORE_SYMBOLS = [
-    "BTC/USDT:USDT", "ETH/USDT:USDT", "BNB/USDT:USDT", "SOL/USDT:USDT", "XRP/USDT:USDT",
-    "DOGE/USDT:USDT", "ADA/USDT:USDT", "TRX/USDT:USDT", "AVAX/USDT:USDT", "LINK/USDT:USDT",
-    "TON/USDT:USDT", "DOT/USDT:USDT", "MATIC/USDT:USDT", "SHIB/USDT:USDT", "LTC/USDT:USDT",
-    "UNI/USDT:USDT", "ATOM/USDT:USDT", "ETC/USDT:USDT", "FIL/USDT:USDT", "AAVE/USDT:USDT",
-    "NEAR/USDT:USDT", "OP/USDT:USDT", "APT/USDT:USDT", "ARB/USDT:USDT", "STX/USDT:USDT",
-    "WIF/USDT:USDT", "PEPE/USDT:USDT", "FET/USDT:USDT", "RENDER/USDT:USDT", "IMX/USDT:USDT",
-    "SUI/USDT:USDT", "SEI/USDT:USDT", "TIA/USDT:USDT", "INJ/USDT:USDT", "RUNE/USDT:USDT",
-    "FTM/USDT:USDT", "ALGO/USDT:USDT", "SAND/USDT:USDT", "MANA/USDT:USDT", "AXS/USDT:USDT",
-    "GALA/USDT:USDT", "EOS/USDT:USDT", "XLM/USDT:USDT", "VET/USDT:USDT", "THETA/USDT:USDT",
-    "ICP/USDT:USDT", "EGLD/USDT:USDT", "FLOW/USDT:USDT", "CHZ/USDT:USDT", "ENJ/USDT:USDT",
-    "JUP/USDT:USDT", "W/USDT:USDT", "TAO/USDT:USDT", "AR/USDT:USDT", "BLUR/USDT:USDT",
-    "SSV/USDT:USDT", "LDO/USDT:USDT", "GRT/USDT:USDT", "PENDLE/USDT:USDT", "PYTH/USDT:USDT",
-    "JTO/USDT:USDT", "NOT/USDT:USDT", "BONK/USDT:USDT", "FLOKI/USDT:USDT", "BOME/USDT:USDT",
-    "ORDI/USDT:USDT", "SATS/USDT:USDT", "ACE/USDT:USDT", "NFP/USDT:USDT", "AI/USDT:USDT",
-    "ALT/USDT:USDT", "JASMY/USDT:USDT", "ONDO/USDT:USDT", "STRK/USDT:USDT", "MEME/USDT:USDT",
-    "PIXEL/USDT:USDT", "PORTAL/USDT:USDT", "AEVO/USDT:USDT", "ETHFI/USDT:USDT", "TNSR/USDT:USDT",
-    "OM/USDT:USDT", "REZ/USDT:USDT", "ZETA/USDT:USDT", "IO/USDT:USDT", "ZK/USDT:USDT",
-    "ZRO/USDT:USDT", "TLM/USDT:USDT", "KAVA/USDT:USDT", "ROSE/USDT:USDT", "CRO/USDT:USDT",
-    "DASH/USDT:USDT", "ZEC/USDT:USDT", "COMP/USDT:USDT", "MKR/USDT:USDT", "SNX/USDT:USDT",
-    "LRC/USDT:USDT", "1INCH/USDT:USDT", "SXP/USDT:USDT", "HOT/USDT:USDT", "BTT/USDT:USDT",
-    "WIN/USDT:USDT", "STORJ/USDT:USDT", "SKL/USDT:USDT", "CTSI/USDT:USDT", "DENT/USDT:USDT",
-    "OCEAN/USDT:USDT", "TRB/USDT:USDT", "HIGH/USDT:USDT", "MAGIC/USDT:USDT", "YGG/USDT:USDT",
-    "DYDX/USDT:USDT", "GMX/USDT:USDT", "API3/USDT:USDT", "COTI/USDT:USDT", "HBAR/USDT:USDT",
-    "ALICE/USDT:USDT"
-]
-SYMBOLS = CORE_SYMBOLS
-
-# ================= 辅助函数 =================
-def fmt_price(p):
-    if p < 0.01: return f"{p:.6f}"
-    if p < 1: return f"{p:.4f}"
-    if p < 100: return f"{p:.2f}"
-    return f"{p:.1f}"
-
-def send_push(text):
-    webhooks = [w for w in [DINGTALK_WEBHOOK, WECOM_WEBHOOK] if w and "在此粘贴" not in w]
-    for wh in webhooks:
         try:
-            requests.post(wh, json={"msgtype":"text","text":{"content":f"【Crypto Pro】\n{text}"}}, timeout=5)
+            # 备选 Binance
+            ex = ccxt.binance({"options": {"defaultType": "swap"}, "enableRateLimit": True, "timeout": 15000})
+            return ex, "Binance"
         except:
-            pass
+            return None, "Connection Failed"
 
-# ================= 技术指标计算 =================
+EXCHANGE, EXCHANGE_NAME = get_exchange()
+
+# ================= 核心币种 =================
+SYMBOLS = [
+    "BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "BNB/USDT:USDT", "XRP/USDT:USDT",
+    "DOGE/USDT:USDT", "ADA/USDT:USDT", "AVAX/USDT:USDT", "LINK/USDT:USDT", "SUI/USDT:USDT",
+    "ORDI/USDT:USDT", "PEPE/USDT:USDT", "WIF/USDT:USDT", "FET/USDT:USDT", "TIA/USDT:USDT",
+    "NEAR/USDT:USDT", "OP/USDT:USDT", "ARB/USDT:USDT", "APT/USDT:USDT", "PENDLE/USDT:USDT"
+] # 这里可以根据需要继续添加
+
+# ================= 策略逻辑函数 =================
+def fmt_price(p):
+    if p < 0.0001: return f"{p:.8f}"
+    if p < 1: return f"{p:.4f}"
+    return f"{p:.2f}"
+
+def send_push(webhook, text):
+    if not webhook or "在此粘贴" in webhook: return
+    try:
+        requests.post(webhook, json={"msgtype":"text","text":{"content":f"【Signal Pro】\n{text}"}}, timeout=5)
+    except: pass
+
 def calculate_indicators(df):
     df = df.copy()
+    # 均线系统
     df['EMA50'] = df['c'].ewm(span=50, adjust=False).mean()
     df['EMA200'] = df['c'].ewm(span=200, adjust=False).mean()
+    # MACD
     e12 = df['c'].ewm(span=12, adjust=False).mean()
     e26 = df['c'].ewm(span=26, adjust=False).mean()
     df['MACD'] = e12 - e26
     df['MACD_signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     df['MACD_H'] = 2 * (df['MACD'] - df['MACD_signal'])
+    # 成交量
     df['Vol_MA20'] = df['v'].rolling(20).mean()
-    df['TR'] = np.maximum(df['h'] - df['l'],
-                          np.maximum(abs(df['h'] - df['c'].shift(1)),
-                                     abs(df['l'] - df['c'].shift(1))))
+    # ATR & ADX
+    df['TR'] = np.maximum(df['h'] - df['l'], 
+                          np.maximum(abs(df['h'] - df['l'].shift(1)), abs(df['l'] - df['c'].shift(1))))
     df['ATR14'] = df['TR'].rolling(14).mean()
-    df['up_move'] = df['h'] - df['h'].shift(1)
-    df['down_move'] = df['l'].shift(1) - df['l']
-    df['plus_dm'] = np.where((df['up_move'] > df['down_move']) & (df['up_move'] > 0), df['up_move'], 0)
-    df['minus_dm'] = np.where((df['down_move'] > df['up_move']) & (df['down_move'] > 0), df['down_move'], 0)
-    df['plus_di'] = 100 * (df['plus_dm'].rolling(14).mean() / df['ATR14'])
-    df['minus_di'] = 100 * (df['minus_dm'].rolling(14).mean() / df['ATR14'])
+    
+    up = df['h'] - df['h'].shift(1)
+    dn = df['l'].shift(1) - df['l']
+    plus_dm = np.where((up > dn) & (up > 0), up, 0)
+    minus_dm = np.where((dn > up) & (dn > 0), dn, 0)
+    
+    tr_sum = df['TR'].rolling(14).sum()
+    df['plus_di'] = 100 * (pd.Series(plus_dm).rolling(14).sum() / tr_sum)
+    df['minus_di'] = 100 * (pd.Series(minus_dm).rolling(14).sum() / tr_sum)
     df['dx'] = 100 * abs(df['plus_di'] - df['minus_di']) / (df['plus_di'] + df['minus_di'])
     df['ADX'] = df['dx'].rolling(14).mean()
+    
     df['HH20'] = df['h'].rolling(20).max().shift(1)
     df['Change'] = df['c'].pct_change()
     return df
 
-def get_ohlcv(sym, tf, limit=300):
+def get_big_trend(symbol, tf):
+    big_tf = '1h' if tf in ['5m', '15m'] else '4h'
     try:
-        if not EXCHANGE:
-            return pd.DataFrame()
-        ohlcv = EXCHANGE.fetch_ohlcv(sym, timeframe=tf, limit=limit)
-        if not ohlcv:
-            return pd.DataFrame()
+        ohlcv = EXCHANGE.fetch_ohlcv(symbol, timeframe=big_tf, limit=100)
         df = pd.DataFrame(ohlcv, columns=["ts","o","h","l","c","v"])
-        df['dt'] = pd.to_datetime(df['ts'], unit='ms')
-        return df
-    except Exception:
-        return pd.DataFrame()
+        ema50 = df['c'].ewm(span=50, adjust=False).mean().iloc[-1]
+        ema200 = df['c'].ewm(span=200, adjust=False).mean().iloc[-1]
+        return 'up' if ema50 > ema200 else 'down'
+    except: return 'neutral'
 
-def get_big_trend(symbol, small_tf):
-    if small_tf in ['5m', '15m']:
-        big_tf = '1h'
-    elif small_tf == '1h':
-        big_tf = '4h'
-    else:
-        big_tf = '1d'
-    df_big = get_ohlcv(symbol, big_tf, 200)
-    if df_big.empty or len(df_big) < 50:
-        return 'neutral'
-    df_big = calculate_indicators(df_big)
-    last = df_big.iloc[-1]
-    if last['EMA50'] > last['EMA200']:
-        return 'up'
-    elif last['EMA50'] < last['EMA200']:
-        return 'down'
-    else:
-        return 'neutral'
-
-# ================= 核心扫描与模拟盘管理（带概率标记） =================
-def scan_and_manage(tf, cfg, enable_trend, enable_pump, mode):
-    """
-    mode: 'conservative' 或 'aggressive'
-    """
+# ================= 核心扫描引擎 =================
+def run_scanner(tf, cfg, mode, webhook):
     new_signals = []
-    logs = {"total": 0, "trend": 0, "pump": 0, "closed": 0}
-    if not EXCHANGE:
-        return pd.DataFrame(), logs
-
-    pos_symbols = [f"{p['symbol']}/USDT:USDT" for p in st.session_state.portfolio if p['status'] == 'open']
-    scan_list = list(set(SYMBOLS + pos_symbols))
-
-    with st.status(f"🔍 正在扫描 {len(scan_list)} 个币种...", expanded=True) as status:
-        # 1. 持仓平仓检查
-        for p in st.session_state.portfolio:
-            if p['status'] != 'open':
-                continue
-            sym_full = f"{p['symbol']}/USDT:USDT"
-            df = get_ohlcv(sym_full, tf, 100)
-            if df.empty:
-                continue
-            df = calculate_indicators(df)
-            last = df.iloc[-1]
-            c, h, l = float(last['c']), float(last['h']), float(last['l'])
-            exit_price = None
-            reason = ""
+    logs = {"total": 0, "closed": 0}
+    
+    # 1. 检查持仓 (模拟平仓逻辑)
+    for p in st.session_state.portfolio:
+        if p['status'] != 'open': continue
+        try:
+            ticker = EXCHANGE.fetch_ticker(f"{p['symbol']}/USDT:USDT")
+            curr_p = ticker['last']
+            exit_p, reason = None, ""
+            
             if p['direction'] == 'long':
-                if l <= p['sl']: exit_price, reason = p['sl'], "止损"
-                elif h >= p['tp']: exit_price, reason = p['tp'], "止盈"
+                if curr_p <= p['sl']: exit_p, reason = p['sl'], "Stop Loss"
+                elif curr_p >= p['tp']: exit_p, reason = p['tp'], "Take Profit"
             else:
-                if h >= p['sl']: exit_price, reason = p['sl'], "止损"
-                elif l <= p['tp']: exit_price, reason = p['tp'], "止盈"
-            if exit_price:
-                pnl_pct = (exit_price - p['entry']) / p['entry'] if p['direction'] == 'long' else (p['entry'] - exit_price) / p['entry']
+                if curr_p >= p['sl']: exit_p, reason = p['sl'], "Stop Loss"
+                elif curr_p <= p['tp']: exit_p, reason = p['tp'], "Take Profit"
+            
+            if exit_p:
+                pnl = (exit_p - p['entry'])/p['entry'] if p['direction']=='long' else (p['entry'] - exit_p)/p['entry']
                 p['status'] = 'closed'
-                p['exit_price'] = exit_price
-                p['pnl_pct'] = pnl_pct
-                p['close_time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                p['reason'] = reason
-                st.session_state.history.insert(0, {
-                    "symbol": p['symbol'], "direction": p['direction'],
-                    "entry": p['entry'], "exit": exit_price, "pnl_pct": pnl_pct,
-                    "reason": reason, "time": p['close_time']
-                })
+                st.session_state.history.insert(0, {**p, "exit": exit_p, "pnl": pnl, "reason": reason, "time": datetime.now().strftime("%m-%d %H:%M")})
                 logs["closed"] += 1
-                emoji = "🎉" if pnl_pct > 0 else "💔"
-                send_push(f"{emoji} {p['symbol']} {p['direction'].upper()} 平仓\n{reason}\n盈亏: {pnl_pct*100:.2f}%")
-        st.session_state.portfolio = [p for p in st.session_state.portfolio if p['status'] == 'open']
+                send_push(webhook, f"🔔 {p['symbol']} 平仓: {reason}\n盈亏: {pnl*100:.2f}%")
+        except: continue
+    
+    st.session_state.portfolio = [p for p in st.session_state.portfolio if p['status'] == 'open']
 
-        # 2. 扫描新信号
-        for i, sym in enumerate(scan_list):
-            if i % 20 == 0:
-                status.update(label=f"扫描进度: {i}/{len(scan_list)} ({sym.split('/')[0]})")
-            df = get_ohlcv(sym, tf, 250)
-            if df.empty or len(df) < 100:
-                continue
-            df = calculate_indicators(df)
-            logs["total"] += 1
-            sym_name = sym.split("/")[0]
-            last = df.iloc[-1]
-            prev = df.iloc[-2]
-            c, h, l = float(last['c']), float(last['h']), float(last['l'])
-            candle_ts = int(last['ts'])
-            has_position = any(p['symbol'] == sym_name and p['status'] == 'open' for p in st.session_state.portfolio)
-            if has_position:
-                continue
-            big_trend = get_big_trend(sym, tf)
-            volatility = (h - l) / c
-            if volatility < 0.005:
-                continue
+    # 2. 扫描新信号
+    with st.status("🚀 引擎加速扫描中...", expanded=True) as status:
+        for sym in SYMBOLS:
+            try:
+                ohlcv = EXCHANGE.fetch_ohlcv(sym, timeframe=tf, limit=200)
+                df = calculate_indicators(pd.DataFrame(ohlcv, columns=["ts","o","h","l","c","v"]))
+                last, prev = df.iloc[-1], df.iloc[-2]
+                logs["total"] += 1
+                
+                # 过滤已持仓币种
+                sym_name = sym.split("/")[0]
+                if any(p['symbol'] == sym_name for p in st.session_state.portfolio): continue
+                
+                big_trend = get_big_trend(sym, tf)
+                atr = last['ATR14']
+                
+                # --- 趋势策略 ---
+                if cfg['enable_trend']:
+                    key = f"T_{sym_name}_{tf}_{last['ts']}"
+                    if key not in st.session_state.cache_data:
+                        # 逻辑：EMA金叉/多头 + MACD柱状图反转 + ADX强趋势
+                        up_cond = last['c'] > last['EMA200'] and last['EMA50'] > last['EMA200']
+                        macd_cross = prev['MACD_H'] < 0 and last['MACD_H'] > 0
+                        adx_ok = last['ADX'] > 20
+                        
+                        if up_cond and macd_cross and adx_ok and (mode=="激进" or big_trend=="up"):
+                            sl = last['c'] - (2 * atr)
+                            tp = last['c'] + (4 * atr)
+                            new_signals.append({"币种": sym_name, "策略": "趋势", "方向": "多", "价格": last['c'], "SL": sl, "TP": tp})
+                            st.session_state.portfolio.append({"symbol":sym_name,"direction":"long","entry":last['c'],"sl":sl,"tp":tp,"status":"open","time":datetime.now().strftime("%H:%M")})
+                            st.session_state.cache_data[key] = time.time()
+                            send_push(webhook, f"📈 {sym_name} 趋势看多\n入场: {fmt_price(last['c'])}\n止损: {fmt_price(sl)}")
 
-            # 概率标记：保守模式为高概率，激进模式为低概率
-            prob_label = "高概率" if mode == "conservative" else "低概率"
-            prob_emoji = "🟢" if mode == "conservative" else "🟡"
+                # --- 异动策略 ---
+                if cfg['enable_pump']:
+                    key = f"P_{sym_name}_{tf}_{last['ts']}"
+                    if key not in st.session_state.cache_data:
+                        vol_ok = last['v'] > last['Vol_MA20'] * cfg['vol_mult']
+                        breakout = last['c'] > last['HH20']
+                        pump_ok = last['Change'] > cfg['pump_pct']
+                        
+                        if breakout and vol_ok and pump_ok:
+                            sl = last['c'] - (1.5 * atr)
+                            tp = last['c'] * 1.1 # 异动通常博取10%波动
+                            new_signals.append({"币种": sym_name, "策略": "异动", "方向": "突破", "价格": last['c'], "SL": sl, "TP": tp})
+                            st.session_state.portfolio.append({"symbol":sym_name,"direction":"long","entry":last['c'],"sl":sl,"tp":tp,"status":"open","time":datetime.now().strftime("%H:%M")})
+                            st.session_state.cache_data[key] = time.time()
+                            send_push(webhook, f"🚀 {sym_name} 暴力突破\n涨幅: {last['Change']*100:.1f}%")
 
-            # --- 趋势策略 ---
-            if enable_trend:
-                key_t = f"T_{sym_name}_{tf}_{candle_ts}"
-                if key_t not in st.session_state.cache_data:
-                    ema50, ema200 = float(last['EMA50']), float(last['EMA200'])
-                    macd_curr, macd_prev = float(last['MACD_H']), float(prev['MACD_H'])
-                    vol_curr, vol_ma = float(last['v']), float(last['Vol_MA20'])
-                    adx_curr = float(last['ADX'])
-
-                    # 根据模式调整条件严格程度
-                    if mode == "conservative":
-                        adx_ok = adx_curr > 20 and adx_curr > float(prev['ADX'])
-                        vol_ok = vol_curr > vol_ma * cfg['trend_vol']
-                        big_conflict_long = (big_trend == 'down')
-                        big_conflict_short = (big_trend == 'up')
-                    else:  # aggressive
-                        adx_ok = adx_curr > 20
-                        vol_ok = vol_curr > vol_ma * cfg['trend_vol']
-                        big_conflict_long = False
-                        big_conflict_short = False
-
-                    # 多头
-                    uptrend = c > ema200 and ema50 > ema200
-                    macd_cross_up = macd_prev < 0 and macd_curr > 0
-                    if uptrend and macd_cross_up and vol_ok and adx_ok and not big_conflict_long:
-                        sl = l - 1.5 * (h - l)
-                        tp = c + 2.0 * (c - sl)
-                        vol_ratio = vol_curr / vol_ma
-                        new_signals.append({
-                            "币种": sym_name, "策略": "趋势", "方向": "多", "概率": prob_label,
-                            "入场": fmt_price(c), "止损": fmt_price(sl), "止盈": fmt_price(tp)
-                        })
-                        st.session_state.portfolio.append({
-                            "symbol": sym_name, "direction": "long",
-                            "entry": c, "sl": sl, "tp": tp,
-                            "time": datetime.now().strftime("%H:%M"), "status": "open"
-                        })
-                        st.session_state.cache_data[key_t] = now_ts
-                        logs["trend"] += 1
-                        send_push(f"{prob_emoji} {sym_name} 趋势多 【{prob_label}】\nADX:{adx_curr:.1f} 量比:{vol_ratio:.1f}\n入:{fmt_price(c)} 损:{fmt_price(sl)} 盈:{fmt_price(tp)}")
-
-                    # 空头
-                    downtrend = c < ema200 and ema50 < ema200
-                    macd_cross_down = macd_prev > 0 and macd_curr < 0
-                    if downtrend and macd_cross_down and vol_ok and adx_ok and not big_conflict_short:
-                        sl = h + 1.5 * (h - l)
-                        tp = c - 2.0 * (sl - c)
-                        vol_ratio = vol_curr / vol_ma
-                        new_signals.append({
-                            "币种": sym_name, "策略": "趋势", "方向": "空", "概率": prob_label,
-                            "入场": fmt_price(c), "止损": fmt_price(sl), "止盈": fmt_price(tp)
-                        })
-                        st.session_state.portfolio.append({
-                            "symbol": sym_name, "direction": "short",
-                            "entry": c, "sl": sl, "tp": tp,
-                            "time": datetime.now().strftime("%H:%M"), "status": "open"
-                        })
-                        st.session_state.cache_data[key_t] = now_ts
-                        logs["trend"] += 1
-                        send_push(f"{prob_emoji} {sym_name} 趋势空 【{prob_label}】\nADX:{adx_curr:.1f} 量比:{vol_ratio:.1f}\n入:{fmt_price(c)} 损:{fmt_price(sl)} 盈:{fmt_price(tp)}")
-
-            # --- 异动策略 ---
-            if enable_pump:
-                key_p = f"P_{sym_name}_{tf}_{candle_ts}"
-                if key_p not in st.session_state.cache_data:
-                    hh20 = float(last['HH20'])
-                    vol_curr, vol_ma = float(last['v']), float(last['Vol_MA20'])
-                    change = float(last['Change'])
-                    breakout = c > hh20
-                    vol_surge = vol_curr > vol_ma * cfg['vol_mult']
-                    pump_ok = change > cfg['pump_pct']
-                    if mode == "conservative":
-                        big_conflict = (big_trend == 'down')
-                    else:
-                        big_conflict = False
-                    if breakout and vol_surge and pump_ok and not big_conflict:
-                        sl = l * 0.92
-                        tp = c * 1.15
-                        vol_ratio = vol_curr / vol_ma
-                        new_signals.append({
-                            "币种": sym_name, "策略": "异动", "方向": "突破", "概率": prob_label,
-                            "入场": fmt_price(c), "止损": fmt_price(sl), "止盈": fmt_price(tp)
-                        })
-                        st.session_state.portfolio.append({
-                            "symbol": sym_name, "direction": "long",
-                            "entry": c, "sl": sl, "tp": tp,
-                            "time": datetime.now().strftime("%H:%M"), "status": "open"
-                        })
-                        st.session_state.cache_data[key_p] = now_ts
-                        logs["pump"] += 1
-                        send_push(f"{prob_emoji} {sym_name} 异动突破 【{prob_label}】\n涨幅:{change*100:.1f}% 量比:{vol_ratio:.1f}\n现:{fmt_price(c)} 损:{fmt_price(sl)} 盈:{fmt_price(tp)}")
-
-        status.update(label=f"✅ 扫描完成！检测 {logs['total']} 币种，信号 {len(new_signals)} 个", state="complete")
-
+            except: continue
+        status.update(label="✅ 扫描任务完成", state="complete")
+    
     save_all_states()
-    df_sig = pd.DataFrame(new_signals) if new_signals else pd.DataFrame(columns=["币种","策略","方向","概率","入场","止损","止盈"])
-    return df_sig, logs
+    return pd.DataFrame(new_signals), logs
 
-# ================= 侧边栏 =================
-st.sidebar.markdown("## ⚙️ 策略配置")
-mode = st.sidebar.radio("🎯 策略模式", ["🔒 保守模式 (高胜率)", "⚡ 激进模式 (高频率)"], index=0)
-mode_key = "conservative" if "保守" in mode else "aggressive"
+# ================= 侧边栏交互 =================
+with st.sidebar:
+    st.title("🛠️ 策略控制台")
+    mode = st.radio("选择运行模式", ["保守 (同步大周期)", "激进 (忽略大周期)"])
+    tf = st.selectbox("监控周期", ["5m", "15m", "1h", "4h"], index=1)
+    
+    with st.expander("🔔 推送设置", expanded=True):
+        webhook = st.text_input("Webhook 地址", placeholder="在此粘贴钉钉/企微链接")
+        if st.button("🧪 测试推送"):
+            send_push(webhook, "测试信息：监控系统已连接成功！")
+            st.toast("已发送测试消息")
 
-tf = st.sidebar.selectbox("🕰️ K线周期", ["5m", "15m", "1h", "4h"], index=1)
-enable_trend = st.sidebar.checkbox("📈 趋势策略 (ADX增强)", value=True)
-enable_pump = st.sidebar.checkbox("🚀 异动策略 (突破追涨)", value=True)
+    st.divider()
+    st.subheader("⚙️ 阈值微调")
+    enable_t = st.toggle("开启趋势策略", value=True)
+    enable_p = st.toggle("开启异动策略", value=True)
+    
+    pump_val = st.slider("异动起步涨幅 (%)", 1.0, 10.0, 3.0) / 100
+    vol_mult = st.slider("成交量倍数", 1.5, 5.0, 2.5)
+    
+    cfg = {"enable_trend": enable_t, "enable_pump": enable_p, "pump_pct": pump_val, "vol_mult": vol_mult}
 
-# 阈值配置
-base_thresholds = {
-    "conservative": {
-        "5m":  {"pump_pct": 0.03, "vol_mult": 3.0, "trend_vol": 1.5},
-        "15m": {"pump_pct": 0.04, "vol_mult": 2.5, "trend_vol": 1.5},
-        "1h":  {"pump_pct": 0.06, "vol_mult": 2.0, "trend_vol": 1.3},
-        "4h":  {"pump_pct": 0.08, "vol_mult": 1.8, "trend_vol": 1.2}
-    },
-    "aggressive": {
-        "5m":  {"pump_pct": 0.02, "vol_mult": 2.5, "trend_vol": 1.2},
-        "15m": {"pump_pct": 0.03, "vol_mult": 2.0, "trend_vol": 1.2},
-        "1h":  {"pump_pct": 0.05, "vol_mult": 1.8, "trend_vol": 1.1},
-        "4h":  {"pump_pct": 0.07, "vol_mult": 1.5, "trend_vol": 1.1}
-    }
-}
-cfg = base_thresholds[mode_key][tf]
-
-with st.sidebar.expander("📊 当前阈值", expanded=False):
-    st.markdown(f"- 模式: **{mode}**")
-    st.markdown(f"- 异动涨幅 ≥ **{cfg['pump_pct']*100:.0f}%**")
-    st.markdown(f"- 异动量能 ≥ **{cfg['vol_mult']}x** 均量")
-    st.markdown(f"- 趋势量能 ≥ **{cfg['trend_vol']}x** 均量")
-    if mode_key == "conservative":
-        st.markdown(f"- ADX: >20 且上升 + 大周期同向")
-    else:
-        st.markdown(f"- ADX: >20 即可 + 忽略大周期")
-
-st.sidebar.divider()
-if st.sidebar.button("🧪 测试推送", use_container_width=True):
-    send_push(f"【测试】{mode} 通道正常，监控已就绪。")
-    st.sidebar.success("已发送")
-
-# ================= 主界面 =================
-st.markdown('<p class="main-header">📊 币安/OKX 合约实战监控 Pro</p>', unsafe_allow_html=True)
-st.markdown(f'<p class="sub-header">数据源: {EXCHANGE_NAME} | 监控: {len(SYMBOLS)} 币种 | 模式: {mode}</p>', unsafe_allow_html=True)
+# ================= 主界面布局 =================
+st.markdown('<div class="main-header">CRYPTO SIGNAL PRO</div>', unsafe_allow_html=True)
+st.markdown(f'<div class="sub-header">当前数据源: {EXCHANGE_NAME} | 监控中: {len(SYMBOLS)} 币种</div>', unsafe_allow_html=True)
 
 if not EXCHANGE:
-    st.error("❌ 无法连接交易所，请稍后刷新。")
+    st.error("无法连接交易所 API，请检查网络或代理设置。")
     st.stop()
 
-df_sig, log_data = scan_and_manage(tf, cfg, enable_trend, enable_pump, mode_key)
+# 核心执行
+df_sig, log_info = run_scanner(tf, cfg, mode, webhook)
 
-# --- 模拟盘战绩 ---
-st.subheader("💰 模拟盘战绩")
-col1, col2, col3, col4 = st.columns(4)
-total_trades = len(st.session_state.history)
-wins = sum(1 for h in st.session_state.history if h['pnl_pct'] > 0)
-win_rate = wins / total_trades if total_trades > 0 else 0
-total_pnl = sum(h['pnl_pct'] for h in st.session_state.history) * 100
-col1.metric("总交易", total_trades)
-col2.metric("胜率", f"{win_rate*100:.1f}%")
-col3.metric("总收益率", f"{total_pnl:.2f}%")
-col4.metric("当前持仓", len(st.session_state.portfolio))
+# 看板数据
+c1, c2, c3, c4 = st.columns(4)
+total_h = st.session_state.history
+wins = [h for h in total_h if h['pnl'] > 0]
+win_rate = (len(wins)/len(total_h)*100) if total_h else 0
+total_pnl = sum(h['pnl'] for h in total_h) * 100
 
-# --- 持仓与历史 Tab ---
-tab1, tab2 = st.tabs(["📌 当前持仓", "📜 历史记录"])
-with tab1:
+with c1: st.metric("胜率", f"{win_rate:.1f}%", delta=f"{len(wins)} 胜")
+with c2: st.metric("累计盈亏", f"{total_pnl:.2f}%")
+with c3: st.metric("活跃持仓", len(st.session_state.portfolio))
+with c4: st.metric("总交易次数", len(total_h))
+
+# 标签页布局
+t1, t2, t3 = st.tabs(["🔥 实时信号", "📊 当前持仓", "📜 历史对账"])
+
+with t1:
+    if df_sig.empty:
+        st.info("当前市场波动平稳，暂无符合策略的信号。")
+    else:
+        # 使用自定义表格显示新信号
+        for _, row in df_sig.iterrows():
+            with st.container():
+                st.markdown(f"""
+                <div style="background: white; border-left: 5px solid #2563eb; padding: 15px; border-radius: 8px; margin-bottom: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+                    <span class="signal-high">{row['策略']}</span> 
+                    <strong style="font-size: 1.2rem; margin-left: 10px;">{row['币种']} {row['方向']}</strong>
+                    <div style="margin-top: 10px; display: flex; gap: 20px; color: #475569;">
+                        <span>入场: <b>{fmt_price(row['价格'])}</b></span>
+                        <span style="color: #dc2626;">止损: {fmt_price(row['SL'])}</span>
+                        <span style="color: #16a34a;">止盈: {fmt_price(row['TP'])}</span>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+with t2:
     if not st.session_state.portfolio:
-        st.info("暂无持仓")
+        st.write("目前没有空闲仓位")
     else:
-        pos_data = []
-        for p in st.session_state.portfolio:
-            pos_data.append({
-                "币种": p['symbol'],
-                "方向": "🟢 多" if p['direction'] == 'long' else "🔴 空",
-                "入场价": fmt_price(p['entry']),
-                "止损": fmt_price(p['sl']),
-                "止盈": fmt_price(p['tp']),
-                "开仓时间": p['time']
-            })
-        st.dataframe(pd.DataFrame(pos_data), use_container_width=True, hide_index=True)
+        pos_df = pd.DataFrame(st.session_state.portfolio)
+        st.dataframe(pos_df[['symbol','direction','entry','sl','tp','time']], use_container_width=True)
 
-with tab2:
+with t3:
     if not st.session_state.history:
-        st.info("暂无历史记录")
+        st.write("等待第一笔交易完成...")
     else:
-        hist_df = pd.DataFrame(st.session_state.history)
-        hist_df['盈亏%'] = hist_df['pnl_pct'].apply(lambda x: f"{x*100:.2f}%")
-        hist_df['结果'] = hist_df['pnl_pct'].apply(lambda x: "✅ 盈利" if x > 0 else "❌ 亏损")
-        hist_df = hist_df[['symbol', 'direction', 'entry', 'exit', '盈亏%', '结果', 'reason', 'time']]
-        st.dataframe(hist_df.head(20), use_container_width=True, hide_index=True)
+        h_df = pd.DataFrame(st.session_state.history)
+        h_df['盈亏%'] = h_df['pnl'].apply(lambda x: f"{x*100:.2f}%")
+        st.dataframe(h_df[['symbol','direction','entry','exit','盈亏%','reason','time']], use_container_width=True)
 
-# --- 本轮信号看板 ---
-st.divider()
-st.subheader("📡 本轮新信号")
-if df_sig.empty:
-    st.info("本轮未产生新信号，系统仍在监控中。")
-else:
-    def highlight_prob(row):
-        if row['概率'] == '高概率':
-            return ['background-color: #d4edda'] * len(row)
-        else:
-            return ['background-color: #fff3cd'] * len(row)
-    styled = df_sig.style.apply(highlight_prob, axis=1)
-    st.dataframe(styled, use_container_width=True, hide_index=True)
-
-# --- 日志 ---
-with st.expander("📋 扫描详情", expanded=False):
-    st.write(f"- 数据源: `{EXCHANGE_NAME}`")
-    st.write(f"- 检测币种: `{log_data['total']}`")
-    st.write(f"- 趋势策略触发: `{log_data['trend']}`")
-    st.write(f"- 异动策略触发: `{log_data['pump']}`")
-    st.write(f"- 平仓单数: `{log_data['closed']}`")
+# 底部扫描日志
+with st.expander("📋 扫描日志"):
+    st.caption(f"最后更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    st.write(f"本轮扫描币种: {log_info['total']} | 平仓处理: {log_info['closed']}")
 
 st.divider()
-st.caption("⚠️ 模拟盘仅供策略验证，不构成投资建议。")
+st.caption("免责声明：本工具仅供技术交流及模拟测试，数字货币投资具有极高风险，请务必谨慎操作。")
