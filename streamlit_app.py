@@ -10,7 +10,7 @@ from datetime import datetime
 import plotly.graph_objects as go
 
 # ================= 配置区 (请在此修改) =================
-DINGTALK_WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=这里替换成你的Token"
+DINGTALK_WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=4037d68aeb929fa3791713dc4b947565a938776fb2edca1c8040faa144b4e216"
 STARTING_CAPITAL = 1000.0  # 初始模拟资金
 RISK_PER_TRADE = 0.2       # 每笔交易占用总资金的 20%
 SYMBOLS = [
