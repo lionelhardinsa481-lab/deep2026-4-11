@@ -7,27 +7,21 @@ from datetime import datetime
 import plotly.graph_objects as go
 
 # ================= 1. 核心配置区 =================
-# 建议在这里直接修改你的钉钉 Webhook
 DING_WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=4037d68aeb929fa3791713dc4b947565a938776fb2edca1c8040faa144b4e216"
 START_CASH = 1000.0
-TRADE_RISK = 0.2  # 单笔占用 20% 资金
-
-# 监控名单（增加了波动较大的热门币种）
-SYMBOLS = [
-    "BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "ORDI/USDT:USDT",
-    "PEPE/USDT:USDT", "SUI/USDT:USDT", "WIF/USDT:USDT", "FET/USDT:USDT",
-    "TIA/USDT:USDT", "OP/USDT:USDT", "ARB/USDT:USDT", "APT/USDT:USDT"
-]
+TRADE_RISK = 0.2
+# 扫描深度：每次从成交额前多少名中抓取黑马
+SCAN_DEPTH = 40 
 
 # ================= 2. 页面与样式 =================
-st.set_page_config(page_title="Crypto AI Trader", layout="wide")
+st.set_page_config(page_title="Crypto BlackHorse Hunter", layout="wide")
 
 st.markdown("""
 <style>
-    .stMetric { background: white; padding: 15px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
-    .status-box { padding: 10px; border-radius: 5px; margin: 5px 0; }
-    .buy-signal { background-color: #dcfce7; color: #166534; border-left: 5px solid #22c55e; }
-    .no-signal { background-color: #f1f5f9; color: #475569; border-left: 5px solid #cbd5e1; }
+    .stApp { background-color: #0f172a; color: #f8fafc; } /* 深色模式更具科技感 */
+    .stMetric { background: #1e293b; padding: 15px; border-radius: 10px; border: 1px solid #334155; }
+    .buy-signal { background-color: #064e3b; color: #34d399; padding: 5px; border-radius: 4px; }
+    .wait-signal { background-color: #1e293b; color: #94a3b8; padding: 5px; border-radius: 4px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -35,47 +29,53 @@ st.markdown("""
 if 'acc' not in st.session_state:
     st.session_state.acc = {
         "cash": START_CASH,
-        "pos": [],      # 持仓: {symbol, side, entry, sl, tp, margin, time}
-        "history": [],  # 历史: {symbol, pnl_usd, pnl_pct, reason, time}
+        "pos": [],
+        "history": [],
         "curve": [START_CASH]
     }
 
-# ================= 4. 工具函数 =================
-def push_msg(msg):
-    if "替换" in DING_WEBHOOK: return
-    try:
-        requests.post(DING_WEBHOOK, json={"msgtype":"text","text":{"content":f"🚀 模拟器提醒：\n{msg}"}}, timeout=5)
-    except: pass
-
+# ================= 4. 动态币种获取 =================
 @st.cache_resource
 def get_api():
-    # 优先使用 OKX，若环境限制可改用 binance
     return ccxt.okx({"options": {"defaultType": "swap"}, "enableRateLimit": True})
 
+def get_dynamic_symbols(api):
+    """从交易所实时获取成交额最大的活跃币种"""
+    try:
+        tickers = api.fetch_tickers()
+        # 过滤掉非 USDT 结算和非永续合约的对
+        df_tickers = pd.DataFrame.from_dict(tickers, orient='index')
+        df_tickers = df_tickers[df_tickers['symbol'].str.contains(':USDT')]
+        
+        # 按成交额 (quoteVolume) 排序，取前 SCAN_DEPTH 名
+        top_symbols = df_tickers.sort_values(by='quoteVolume', ascending=False).head(SCAN_DEPTH)
+        return top_symbols['symbol'].tolist()
+    except Exception as e:
+        st.error(f"获取动态币种失败: {e}")
+        return ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT"]
+
 def get_indicators(df):
-    """策略指标计算"""
-    # 趋势线：EMA20 (更灵敏)
     df['ema20'] = df['c'].ewm(span=20, adjust=False).mean()
-    # 波动率：ATR14 (用于止损)
     df['tr'] = np.maximum(df['h']-df['l'], np.maximum(abs(df['h']-df['c'].shift(1)), abs(df['l']-df['c'].shift(1))))
     df['atr'] = df['tr'].rolling(14).mean()
-    # 量能：MA20成交量
     df['v_ma'] = df['v'].rolling(20).mean()
-    # 动量：RSI
-    delta = df['c'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    df['rsi'] = 100 - (100 / (1 + rs))
     return df
 
+def push_msg(msg):
+    if "替换" in DING_WEBHOOK: return
+    try: requests.post(DING_WEBHOOK, json={"msgtype":"text","text":{"content":f"🔥 黑马猎手提醒：\n{msg}"}}, timeout=5)
+    except: pass
+
 # ================= 5. 核心交易引擎 =================
-def execute_cycle():
+def run_hunter_engine():
     api = get_api()
     acc = st.session_state.acc
     now = datetime.now().strftime("%H:%M:%S")
     
-    # --- A. 检查持仓 (平仓逻辑) ---
+    # 获取当前最火爆的币种
+    dynamic_list = get_dynamic_symbols(api)
+    
+    # --- A. 检查平仓 ---
     still_open = []
     for p in acc['pos']:
         try:
@@ -83,30 +83,26 @@ def execute_cycle():
             cur = t['last']
             pnl_p = (cur - p['entry'])/p['entry'] if p['side']=='多' else (p['entry']-cur)/p['entry']
             
-            # 止损止盈触发
-            is_close = False
-            reason = ""
+            is_close, reason = False, ""
             if cur <= p['sl'] if p['side']=='多' else cur >= p['sl']:
-                is_close, reason = True, "🛑 止损平仓"
+                is_close, reason = True, "🛑 自动止损"
             elif cur >= p['tp'] if p['side']=='多' else cur <= p['tp']:
-                is_close, reason = True, "🎯 止盈平仓"
+                is_close, reason = True, "🎯 自动止盈"
             
             if is_close:
                 profit = p['margin'] * pnl_p
                 acc['cash'] += (p['margin'] + profit)
                 acc['history'].append({**p, "exit":cur, "pnl_usd":profit, "pnl_pct":pnl_p, "reason":reason, "end_time":now})
                 acc['curve'].append(acc['cash'] + sum(x['margin'] for x in still_open))
-                push_msg(f"【平仓成功】\n币种：{p['symbol']}\n盈亏：{profit:.2f} USDT ({pnl_p*100:.2f}%)")
-            else:
-                still_open.append(p)
+                push_msg(f"✅ 平仓结算\n币种：{p['symbol']}\n原因：{reason}\n净盈亏：{profit:.2f} USDT")
+            else: still_open.append(p)
         except: still_open.append(p)
     acc['pos'] = still_open
 
-    # --- B. 扫描入场 (新策略逻辑) ---
-    radar_logs = []
-    for sym in SYMBOLS:
+    # --- B. 动态扫描入场 ---
+    radar_report = []
+    for sym in dynamic_list:
         s_name = sym.split('/')[0]
-        # 排除已持仓
         if any(p['symbol'] == s_name for p in acc['pos']): continue
         
         try:
@@ -114,96 +110,82 @@ def execute_cycle():
             df = get_indicators(pd.DataFrame(bars, columns=['t','o','h','l','c','v']))
             last = df.iloc[-1]
             
-            # --- 优化后的宽松策略 ---
-            cond_trend = last['c'] > last['ema20']       # 价格在均线上方
-            cond_vol = last['v'] > last['v_ma'] * 1.3     # 成交量是均值的1.3倍 (原2.5倍太严)
-            cond_rsi = last['rsi'] > 50                  # 强势区域
+            # 黑马突破逻辑：
+            # 1. 价格站稳 EMA20
+            # 2. 当前成交量 > 过去20周期均值 1.5倍 (代表有人抢筹)
+            # 3. 价格创 20 周期新高 (确认暴涨趋势)
+            is_high = last['c'] >= df['h'].rolling(20).max().iloc[-1]
+            cond_vol = last['v'] > last['v_ma'] * 1.5
+            cond_trend = last['c'] > last['ema20']
             
-            if cond_trend and cond_vol and cond_rsi:
-                # 符合条件，入场
+            if is_high and cond_vol and cond_trend:
                 margin = acc['cash'] * TRADE_RISK
                 if acc['cash'] < margin: continue
                 
                 entry_p = last['c']
-                sl = entry_p - (2 * last['atr']) # 2倍ATR止损
-                tp = entry_p + (4 * last['atr']) # 4倍ATR止盈
+                sl = entry_p - (1.5 * last['atr'])
+                tp = entry_p + (3.5 * last['atr'])
                 
                 acc['cash'] -= margin
-                acc['pos'].append({
-                    "symbol": s_name, "side": "多", "entry": entry_p, 
-                    "sl": sl, "tp": tp, "margin": margin, "time": now
-                })
-                push_msg(f"【入场提醒】\n币种：{s_name}\n价格：{entry_p}\n止损：{sl:.4f}")
-                radar_logs.append({"币种": s_name, "状态": "🚀 已买入", "详情": "三项指标全达标"})
+                acc['pos'].append({"symbol": s_name, "side": "多", "entry": entry_p, "sl": sl, "tp": tp, "margin": margin, "time": now})
+                push_msg(f"🚀 捕获到黑马突破！\n币种：{s_name}\n入场价：{entry_p}\n注意：该币种成交额已进入全网前{SCAN_DEPTH}")
+                radar_report.append({"币种": s_name, "成交额排名": "Top", "状态": "🚀 捕捉成功"})
             else:
-                # 记录为何不买
-                fail_reason = []
-                if not cond_trend: fail_reason.append("趋势向下")
-                if not cond_vol: fail_reason.append(f"量能不足({last['v']/last['v_ma']:.1f}x)")
-                if not cond_rsi: fail_reason.append("RSI偏弱")
-                radar_logs.append({"币种": s_name, "状态": "😴 观察中", "详情": " & ".join(fail_reason)})
+                radar_report.append({"币种": s_name, "成交额排名": "Top", "状态": "😴 震荡中"})
         except: continue
     
-    return radar_logs
+    return radar_report
 
-# ================= 6. UI 布局 =================
-st.title("⚡ Crypto Simulator Pro V3.2")
+# ================= 6. UI 渲染 =================
+st.markdown('<h1 style="text-align: center; color: #60a5fa;">🦅 CRYPTO 黑马动态捕捉器</h1>', unsafe_allow_html=True)
 
-# 侧边栏
+# 侧边栏：配置
 with st.sidebar:
-    st.header("🔧 系统设置")
-    test_webhook = st.text_input("钉钉 Webhook", value=DING_WEBHOOK, type="password")
-    if st.button("🧪 测试推送"):
-        res = requests.post(test_webhook, json={"msgtype":"text","text":{"content":"模拟器联调：测试成功！"}})
-        st.write(res.json())
+    st.header("⚙️ 猎手设置")
+    st.info("系统会自动寻找全市场成交额最大的币种进行实时监控。")
+    new_webhook = st.text_input("钉钉 Webhook", value=DING_WEBHOOK, type="password")
     
     st.divider()
-    if st.button("🔄 手动强制刷新", type="primary"):
+    if st.button("🔄 立即全市场扫描", type="primary"):
         st.rerun()
-    
-    if st.button("🗑️ 重置账户历史"):
+    if st.button("🗑️ 清空账户数据"):
         st.session_state.acc = {"cash": START_CASH, "pos": [], "history": [], "curve": [START_CASH]}
         st.rerun()
 
-# 核心计算与雷达报告
-radar_data = execute_cycle()
+# 执行引擎
+radar_data = run_hunter_engine()
 
-# 顶部指标看板
+# 数据看板
 acc = st.session_state.acc
-cur_equity = acc['cash'] + sum(p['margin'] for p in acc['pos'])
-roi = (cur_equity - START_CASH) / START_CASH * 100
-
+equity = acc['cash'] + sum(p['margin'] for p in acc['pos'])
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("账户总净值", f"${cur_equity:.2f}", delta=f"{roi:.2f}%")
-c2.metric("可用余额", f"${acc['cash']:.2f}")
-c3.metric("当前持仓", f"{len(acc['pos'])} 单")
-c4.metric("已完成交易", f"{len(acc['history'])} 单")
+c1.metric("当前总资产", f"${equity:.2f}", delta=f"{(equity-START_CASH)/START_CASH*100:.2f}%")
+c2.metric("可用 USDT", f"${acc['cash']:.2f}")
+c3.metric("活跃单数", len(acc['pos']))
+c4.metric("已捕获次数", len(acc['history']))
 
-# 标签页
-tab1, tab2, tab3 = st.tabs(["🎯 实时诊断雷达", "🏹 仓位管理", "📜 历史对账"])
+# 诊断与展示
+t1, t2, t3 = st.tabs(["📡 实时动态雷达", "💼 猎物仓位", "📖 狩猎日志"])
 
-with tab1:
-    st.subheader("策略雷达 (每分钟更新)")
-    # 展示为什么没交易
-    df_radar = pd.DataFrame(radar_data)
-    if not df_radar.empty:
-        st.table(df_radar)
+with t1:
+    st.subheader(f"当前监控中的 Top {SCAN_DEPTH} 成交量黑马")
+    if radar_data:
+        st.table(pd.DataFrame(radar_data).head(15)) # 仅展示前15个活跃的
     
-    # 收益曲线
-    fig = go.Figure(data=go.Scatter(y=acc['curve'], mode='lines+markers', line=dict(color='#10b981')))
-    fig.update_layout(title="资产增长曲线", height=300)
+    fig = go.Figure(data=go.Scatter(y=acc['curve'], mode='lines', line=dict(color='#60a5fa', width=3)))
+    fig.update_layout(title="模拟账户资金曲线", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color="white"))
     st.plotly_chart(fig, use_container_width=True)
 
-with tab2:
+with t2:
     if acc['pos']:
-        st.dataframe(pd.DataFrame(acc['pos']), use_container_width=True)
+        st.write(pd.DataFrame(acc['pos']))
     else:
-        st.info("当前无持仓，等待信号中...")
+        st.info("暂未发现满足暴涨突破条件的币种。")
 
-with tab3:
+with t3:
     if acc['history']:
-        st.dataframe(pd.DataFrame(acc['history']).sort_index(ascending=False), use_container_width=True)
+        st.write(pd.DataFrame(acc['history']).sort_index(ascending=False))
     else:
-        st.write("暂无成交记录")
+        st.write("等待第一笔狩猎完成...")
 
-st.caption(f"最后刷新时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+st.caption(f"系统运行中... 扫描时间: {datetime.now().strftime('%H:%M:%S')}")
